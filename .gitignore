@@ -1,0 +1,13 @@
+__pycache__
+.python-version
+.venv
+.DS_STORE
+*.log
+*.egg-info
+dist
+.env
+datasets
+wandb
+checkpoints
+.coverage
+Minimalist_LLM_Pretraining/datasets
