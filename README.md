@@ -17,6 +17,25 @@ Here, we release the experiment code, scripts, and supporting utilities used for
 
 ---
 
+## Repository Structure
+
+The codebase is organized into several directories for different experiments, built on top of the core optimizer implementations:
+
+*   **`modded-nanogpt/`**: Code for running the GPT-2 pretraining experiments. Adapted from [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
+    *   `train_gpt2.py`: Main script for training GPT-2 models.
+    *   `eval_checkpoint_mc_loss.py`: Evaluates training checkpoints using Monte Carlo loss to measure weight uncertainty.
+*   **`Minimalist_LLM_Pretraining/`**: Code for Llama pretraining experiments. Adapted from [OptimAI-Lab/Minimalist_LLM_Pretraining](https://github.com/OptimAI-Lab/Minimalist_LLM_Pretraining).
+    *   `torchrun_main_DDP.py`: Pretraining script using PyTorch Distributed Data Parallel (DDP).
+    *   `eval_llama_checkpoint_mc_loss.py`: Evaluates Llama checkpoints via Monte Carlo loss.
+*   **`clip-finetuning/`**: Code for fine-tuning CLIP visual encoders on image classification datasets. Adapted from [crisostomi/model-merging](https://github.com/crisostomi/model-merging).
+    *   `finetune.py`: Standalone script for training and evaluation.
+    *   `best_hparams/`: Contains optimal hyperparameters for each dataset/optimizer pair.
+*   **`src/`**: Contains the source code for the core packages.
+    *   `vonsoap/`: Main Python package containing the optimizer implementations (SOAP, EVON, IVON).
+*   **`scripts/`**: Helper bash scripts for launching training and checkpoint evaluations (e.g., `gpt_speedrun_local.bash`, `llama_checkpoint_mc_eval_local.bash`).
+
+---
+
 ## Citation
 
 If you use EVON or the SOAP-Bubbles framework in your research, please cite our paper:

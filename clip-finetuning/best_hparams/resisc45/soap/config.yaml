@@ -1,0 +1,38 @@
+accum_steps: 1
+batch_size: 128
+checkpoint_epochs:
+- 1
+- 7
+- 15
+checkpointing_enabled: false
+dataset_name: resisc45
+device: cuda
+embed_dim: 512
+head_artifact_ref: "adrianrob1-Sapienza Universit\xE0 di Roma/clip-finetune-sweeps/head_vit_base_patch16_clip_224.openai_resisc45_seed42:latest"
+head_source_loaded: wandb
+lr: 1.266782087274654e-05
+model_name: vit_base_patch16_224.openai_clip
+momentum: null
+n_total_params: 86193152
+n_trainable_params: 85327872
+num_classes: 45
+optim: soap
+optim_cfg_betas:
+- 0.85
+- 0.99
+optim_cfg_lr: 1.266782087274654e-05
+optim_cfg_shampoo_beta: 0.99
+optim_cfg_weight_decay: 0.007333896735776149
+optimizer_hparams:
+  betas:
+  - 0.85
+  - 0.99
+  lr: 1.266782087274654e-05
+  shampoo_beta: 0.99
+  weight_decay: 0.007333896735776149
+physical_batch_size: 128
+seed: 42
+total_epochs: 15
+trainable_scope: linear
+wandb_project: clip-finetune-sweeps
+weight_decay: 0.007333896735776149

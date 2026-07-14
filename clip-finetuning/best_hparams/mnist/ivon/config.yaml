@@ -1,0 +1,40 @@
+accum_steps: 1
+batch_size: 128
+checkpoint_epochs:
+- 1
+- 2
+- 5
+checkpointing_enabled: false
+dataset_name: mnist
+device: cuda
+embed_dim: 512
+head_artifact_ref: "adrianrob1-Sapienza Universit\xE0 di Roma/clip-finetune-sweeps/head_vit_base_patch16_clip_224.openai_mnist_seed42:latest"
+head_source_loaded: wandb
+lr: 0.006749954175762228
+model_name: vit_base_patch16_224.openai_clip
+momentum: null
+n_total_params: 86193152
+n_trainable_params: 85327872
+num_classes: 10
+optim: ivon
+optim_cfg_beta1: 0.95
+optim_cfg_beta2: 0.9995
+optim_cfg_ess: 500000000
+optim_cfg_hess_init: 0.001
+optim_cfg_lr: 0.006749954175762228
+optim_cfg_mc_samples: 1
+optim_cfg_weight_decay: 0.003385772288464657
+optimizer_hparams:
+  beta1: 0.95
+  beta2: 0.9995
+  ess: 500000000
+  hess_init: 0.001
+  lr: 0.006749954175762228
+  mc_samples: 1
+  weight_decay: 0.003385772288464657
+physical_batch_size: 128
+seed: 42
+total_epochs: 5
+trainable_scope: linear
+wandb_project: clip-finetune-sweeps
+weight_decay: 0.003385772288464657

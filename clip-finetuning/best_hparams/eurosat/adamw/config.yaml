@@ -1,0 +1,31 @@
+accum_steps: 1
+batch_size: 128
+checkpoint_epochs:
+- 1
+- 6
+- 12
+checkpointing_enabled: false
+dataset_name: eurosat
+device: cuda
+embed_dim: 512
+head_artifact_ref: "adrianrob1-Sapienza Universit\xE0 di Roma/clip-finetune-sweeps/head_vit_base_patch16_clip_224.openai_eurosat_seed42:latest"
+head_source_loaded: wandb
+lr: 7.039306097281046e-06
+model_name: vit_base_patch16_224.openai_clip
+momentum: null
+n_total_params: 86193152
+n_trainable_params: 85327872
+num_classes: 10
+optim: adamw
+optim_cfg_lr: 7.039306097281046e-06
+optim_cfg_weight_decay: 0.0025615098451489044
+optimizer_hparams:
+  lr: 7.039306097281046e-06
+  weight_decay: 0.0025615098451489044
+physical_batch_size: 128
+seed: 42
+total_epochs: 12
+trainable_scope: linear
+wandb_project: clip-finetune-sweeps
+weight-decay: 0.0025615098451489044
+weight_decay: 0.0025615098451489044

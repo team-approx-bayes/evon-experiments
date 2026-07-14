@@ -1,0 +1,31 @@
+accum_steps: 1
+batch_size: 128
+checkpoint_epochs:
+- 1
+- 38
+- 76
+checkpointing_enabled: false
+dataset_name: dtd
+device: cuda
+embed_dim: 512
+head_artifact_ref: "adrianrob1-Sapienza Universit\xE0 di Roma/clip-finetune-sweeps/head_vit_base_patch16_clip_224.openai_dtd_seed42:latest"
+head_source_loaded: wandb
+lr: 1.70067229264059e-05
+model_name: vit_base_patch16_224.openai_clip
+momentum: null
+n_total_params: 86193152
+n_trainable_params: 85327872
+num_classes: 47
+optim: adamw
+optim_cfg_lr: 1.70067229264059e-05
+optim_cfg_weight_decay: 0.014404916346084352
+optimizer_hparams:
+  lr: 1.70067229264059e-05
+  weight_decay: 0.014404916346084352
+physical_batch_size: 128
+seed: 42
+total_epochs: 76
+trainable_scope: linear
+wandb_project: clip-finetune-sweeps
+weight-decay: 0.014404916346084352
+weight_decay: 0.014404916346084352

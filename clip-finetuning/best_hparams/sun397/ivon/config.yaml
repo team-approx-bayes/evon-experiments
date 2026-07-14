@@ -1,0 +1,40 @@
+accum_steps: 1
+batch_size: 128
+checkpoint_epochs:
+- 1
+- 7
+- 14
+checkpointing_enabled: false
+dataset_name: sun397
+device: cuda
+embed_dim: 512
+head_artifact_ref: "adrianrob1-Sapienza Universit\xE0 di Roma/clip-finetune-sweeps/head_vit_base_patch16_clip_224.openai_sun397_seed42:latest"
+head_source_loaded: wandb
+lr: 0.005276780896691828
+model_name: vit_base_patch16_224.openai_clip
+momentum: null
+n_total_params: 86193152
+n_trainable_params: 85327872
+num_classes: 397
+optim: ivon
+optim_cfg_beta1: 0.95
+optim_cfg_beta2: 0.999
+optim_cfg_ess: 100000000
+optim_cfg_hess_init: 0.001
+optim_cfg_lr: 0.005276780896691828
+optim_cfg_mc_samples: 1
+optim_cfg_weight_decay: 0.00035086322184711086
+optimizer_hparams:
+  beta1: 0.95
+  beta2: 0.999
+  ess: 100000000
+  hess_init: 0.001
+  lr: 0.005276780896691828
+  mc_samples: 1
+  weight_decay: 0.00035086322184711086
+physical_batch_size: 128
+seed: 42
+total_epochs: 14
+trainable_scope: linear
+wandb_project: clip-finetune-sweeps
+weight_decay: 0.00035086322184711086
