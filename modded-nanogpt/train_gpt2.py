@@ -5,8 +5,28 @@ import math
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
 import uuid
+import json
 import glob
 import time
+import signal
+
+_PREEMPTION_REQUESTED = False
+
+def _request_preemption(signum, frame):
+    global _PREEMPTION_REQUESTED
+    _PREEMPTION_REQUESTED = True
+
+def _install_preemption_handlers():
+    for sig_name in ("SIGTERM", "SIGINT", "SIGUSR1", "SIGUSR2"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            signal.signal(sig, _request_preemption)
+
+def _preemption_requested(device):
+    flag = torch.tensor(1 if _PREEMPTION_REQUESTED else 0, device=device, dtype=torch.int32)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    return bool(flag.item())
 from dataclasses import dataclass
 from math import cos, pi
 from contextlib import nullcontext
@@ -20,8 +40,7 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-from vonsoap.optimizers import SOAP, AdamWBF16, DistributedMuon, KLOpt, IVON
-from vonsoap.optimizers import NewEVON, OldEVON
+from vonsoap.optimizers import SOAP, AdamWBF16, IVON, EVON
 
 try:
     import wandb
@@ -123,6 +142,12 @@ parser.add_argument(
     default="",
     type=str,
     help="Checkpoint path to resume from.",
+)
+parser.add_argument(
+    "--wandb_id",
+    default="",
+    type=str,
+    help="Optional WandB run ID to resume logging to an existing run.",
 )
 parser.add_argument(
     "--diag_every",
@@ -444,6 +469,7 @@ class Hyperparameters:
     save_every: int = args0.save_every
     checkpoint_dir: str = args0.checkpoint_dir
     resume_from: str = args0.resume_from
+    wandb_id: str = args0.wandb_id
 
     opt_name: str = args0.opt
     experiment: str = args0.experiment
@@ -471,6 +497,8 @@ class Hyperparameters:
     von_sync: bool = args0.von_sync
     no_lr_rescale: bool = args0.no_lr_rescale
     whiten_evon_grad: bool = args0.whiten_evon_grad
+    diag_every: int = args0.diag_every
+    hess_hist_freq: int = args0.hess_hist_freq
 
 
 args = Hyperparameters()
@@ -481,6 +509,7 @@ if args.save_every < 0:
 # set up DDP (distributed data parallel). torchrun sets this env variable
 # assert torch.cuda.is_available()  
 dist.init_process_group(backend="nccl")
+_install_preemption_handlers()
 ddp_rank = int(os.environ["RANK"])
 ddp_local_rank = int(os.environ["LOCAL_RANK"])
 ddp_world_size = int(os.environ["WORLD_SIZE"])
@@ -493,13 +522,42 @@ master_process = ddp_rank == 0  # this process will do logging, checkpointing et
 if args.opt_name.find("muon") >= 0 or args.opt_name.find("adam") >= 0:
     args.T = 1
 run_name = "%s-T%d-%s-%s" % (args.opt_name, args.T, args0.schd, socket.gethostname())
+checkpoint_dir = args.checkpoint_dir.strip() or os.path.join("checkpoints", args.experiment)
+
+wandb_id = args.wandb_id.strip() or None
+if wandb_id is None and args.resume_from:
+    if os.path.exists(args.resume_from):
+        try:
+            ckpt_meta = torch.load(args.resume_from, map_location="cpu")
+            wandb_id = ckpt_meta.get("wandb_id", None)
+        except Exception:
+            pass
+    if wandb_id is None:
+        wandb_info_path = os.path.join(checkpoint_dir, "wandb.json")
+        if os.path.exists(wandb_info_path):
+            try:
+                with open(wandb_info_path) as f:
+                    wandb_info = json.load(f)
+                wandb_id = wandb_info.get("wandb_id", None)
+            except Exception:
+                pass
+
 if master_process and wandb is not None:
     wandb.require("core")
-    run = wandb.init(
-        project=args.experiment, name=run_name, tags=["normal", "hess_hist"] if args.collect_stats else ["normal"], entity="adrianrob1-Sapienza Università di Roma", config=args
+    wandb_kwargs = dict(
+        project=args.experiment,
+        name=run_name,
+        tags=["normal", "hess_hist"] if args.collect_stats else ["normal"],
+        entity="adrianrob1-Sapienza Università di Roma",
+        config=args,
     )
+    if wandb_id:
+        wandb_kwargs.update(id=wandb_id, resume="allow")
+    run = wandb.init(**wandb_kwargs)
 
-checkpoint_dir = args.checkpoint_dir.strip() or os.path.join("checkpoints", args.experiment)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(os.path.join(checkpoint_dir, "wandb.json"), "w") as f:
+        json.dump({"wandb_id": run.id}, f, indent=4)
 
 # convenience variables
 B, T = args.device_batch_size, args.sequence_length
@@ -671,61 +729,7 @@ else:
     print("adamw opt", optimizer1)
 
 my_lr = args.lr
-if args.opt_name.find("dmuon") >= 0:
-    if args.opt_name.find("_polar") > 0:
-        backend = "polar"
-    else:
-        backend = "newtonschulz"
-    optimizer2 = DistributedMuon(
-        raw_model.transformer.h.parameters(),
-        lr=my_lr,
-        momentum=args.momentum,
-        nesterov=True,
-        ns_steps=5,
-        weight_decay=args.weight_decay,
-        backend=backend,
-        adamw_betas=adamw_betas,
-        adamw_eps=adamw_damping,
-        muon_eps=args.damping,
-    )
-
-elif args.opt_name.find('klsoap')>=0:
-    cast_dtype = torch.bfloat16
-    if args.opt_name.find('_fp32')>=0:
-        cast_dtype = torch.float32
-    improve_orth = False
-    if args.opt_name.find('_improve')>=0:
-        improve_orth = True
-    optimizer2 = KLOpt(raw_model.transformer.h.parameters(), lr=my_lr,
-            betas=(args.momentum, 1.0-args.lr_cov),
-            eps = args.damping,
-            weight_decay=args.weight_decay,
-            precondition_frequency=args.T,
-            using_klsoap = True, #This method becomes KL-SOAP if using_klsoap = True
-            normalize_grads = False,
-            using_damping = False,
-            using_clamping = True,
-            improve_orth = improve_orth,
-            cast_dtype = cast_dtype,
-        )
-
-elif args.opt_name.find('klshampoo')>=0:
-    cast_dtype = torch.bfloat16
-    if args.opt_name.find('_fp32')>=0:
-        cast_dtype = torch.float32
-    optimizer2 = KLOpt(raw_model.transformer.h.parameters(), lr=my_lr,
-            betas=(args.momentum, 1.0-args.lr_cov),
-            eps = args.damping,
-            weight_decay=args.weight_decay,
-            precondition_frequency=args.T,
-            using_klsoap = False, #This method becomes KL-Shampoo if using_klsoap = False
-            normalize_grads = False,
-            using_damping = False,
-            using_clamping = True,
-            cast_dtype = cast_dtype,
-        )
-
-elif args.opt_name.find("soap") >= 0:
+if args.opt_name.find("soap") >= 0:
     normalize_grads = False
     if args.opt_name.find("_norm") > 0:
         print("using norm in soap")
@@ -758,7 +762,7 @@ elif args.opt_name.find("ivon") >= 0:
     )
 
 elif args.opt_name.find("evon") >= 0:
-    optimizer2 = NewEVON(
+    optimizer2 = EVON(
         raw_model.transformer.h.parameters(),
         lr=my_lr,
         betas=(args.momentum, 1.0 - args.lr_cov),
@@ -775,7 +779,7 @@ elif args.opt_name.find("evon") >= 0:
         phasing=args.evon_phased_grads,
         price_clip_ratio=args.price_clip_ratio,
         sync=args.von_sync,
-        whiten_grad=args.whiten_evon_grad
+        whiten_prec_grad=args.whiten_evon_grad
     )
 
 print(optimizer2)
@@ -874,6 +878,8 @@ elif args0.schd == "cosine":
 else:
     assert False
 
+training_time_ms = 0.0
+
 if args.resume_from:
     if master_process:
         print(f"Resuming from checkpoint: {args.resume_from}")
@@ -884,9 +890,41 @@ if args.resume_from:
         opt.load_state_dict(state)
     for sched, state in zip(schedulers, checkpoint.get("schedulers", [])):
         sched.load_state_dict(state)
-    if master_process:
-        print(f"Resumed at loop step {checkpoint.get('step', 0)}")
+    training_time_ms = float(checkpoint.get("training_time_ms", 0))
     resume_start_step = int(checkpoint.get("step", 0))
+
+    # Check WandB history/summary if a higher train_time_ms is logged
+    wandb_time = None
+    if master_process and wandb is not None and 'run' in locals() and run is not None:
+        try:
+            api = wandb.Api()
+            wandb_path = f"{run.entity}/{run.project}/{run.id}" if hasattr(run, "entity") and run.entity else f"{run.project}/{run.id}"
+            api_run = api.run(wandb_path)
+            summary_time = api_run.summary.get("train_time_ms", None)
+            if summary_time is not None:
+                wandb_time = float(summary_time)
+            else:
+                history = api_run.history(keys=["train_time_ms"], pandas=False, samples=10000)
+                for row in history:
+                    tm = row.get("train_time_ms", None)
+                    if tm is not None:
+                        wandb_time = max(wandb_time or 0.0, float(tm))
+        except Exception as e:
+            if master_process:
+                print(f"Note: Could not query WandB for train_time_ms: {e}")
+
+    if wandb_time is not None and wandb_time > training_time_ms:
+        training_time_ms = wandb_time
+        if master_process:
+            print(f"Prioritized higher train_time from WandB history: {training_time_ms:.0f}ms")
+
+    t_tensor = torch.tensor([training_time_ms], device=device, dtype=torch.float64)
+    if dist.is_available() and dist.is_initialized():
+        dist.broadcast(t_tensor, src=0)
+    training_time_ms = float(t_tensor.item())
+
+    if master_process:
+        print(f"Resumed at loop step {resume_start_step} (accumulated train_time: {training_time_ms:.0f}ms)")
 else:
     resume_start_step = 0
 
@@ -912,8 +950,6 @@ if master_process:
         result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         f.write(f'{result.stdout}\n')
         f.write('='*100 + '\n')
-
-training_time_ms = 0
 
 
 def sampled_params_context(optimizer, train=False):
@@ -979,6 +1015,10 @@ if hasattr(optimizer2, "sampled_params"):
 train_loader.reset()
 is_early_stop = False
 for step in range(resume_start_step, args.num_iterations + 1):
+    if step == resume_start_step:
+        torch.cuda.synchronize()
+        t0 = time.time()
+
     if args.opt_name.find("evon") >= 0 or args.opt_name.find("ivon") >= 0:
         new_ess = get_ess_cosine(step, args.ess, args.ess_min_fac, args.ess_anneal_steps)
 
@@ -993,7 +1033,7 @@ for step in range(resume_start_step, args.num_iterations + 1):
     # This effectively ignores timing first 10 steps, which are slower for weird reasons.
     # Alternately, and slightly more correctly in terms of benchmarking, we could do 10
     # steps with dummy data first, and then re-initialize the model and reset the loader.
-    if step == 10:
+    if step == 10 and resume_start_step < 10:
         training_time_ms = 0
         t0 = time.time()
     timed_steps = (
@@ -1059,7 +1099,10 @@ for step in range(resume_start_step, args.num_iterations + 1):
                 f"step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / (timed_steps - 1):.2f}ms"
             )
             if wandb is not None:
-                val_log = {"test_loss": val_loss.item()}
+                val_log = {
+                    "test_loss": val_loss.item(),
+                    "train_time_ms": training_time_ms,
+                }
                 if mc_samples > 1:
                     val_log["test_loss@mean"] = val_loss_mean.item()
                 run.log(val_log, step=int(step + 1))
@@ -1101,8 +1144,10 @@ for step in range(resume_start_step, args.num_iterations + 1):
         torch.cuda.synchronize()
         t0 = time.time()
 
+    preemption_now = _preemption_requested(device)
+
     if master_process and (
-        last_step or (args.save_every > 0 and step % args.save_every == 0)
+        last_step or preemption_now or (args.save_every > 0 and step % args.save_every == 0)
     ):
         # stop the clock
         torch.cuda.synchronize()
@@ -1115,6 +1160,8 @@ for step in range(resume_start_step, args.num_iterations + 1):
             optimizers=[opt.state_dict() for opt in optimizers],
             schedulers=[sched.state_dict() for sched in schedulers],
             args=vars(args0),
+            wandb_id=run.id if 'run' in locals() and run is not None else None,
+            training_time_ms=training_time_ms,
         )
         ckpt_path = os.path.join(checkpoint_dir, f"state_step{step:06d}.pt")
         latest_path = os.path.join(checkpoint_dir, "latest.pt")
@@ -1124,6 +1171,13 @@ for step in range(resume_start_step, args.num_iterations + 1):
         # start the clock again
         torch.cuda.synchronize()
         t0 = time.time()
+
+    if preemption_now:
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        if master_process:
+            print("Preemption/termination signal received; checkpoint saved. Exiting cleanly.")
+        break
 
     # bit confusing: we want to make sure to eval on 0th iteration
     # but also after the very last iteration. so we loop for step <= num_iterations

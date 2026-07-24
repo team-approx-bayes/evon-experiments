@@ -351,9 +351,10 @@ class SOAP(optim.Optimizer):
             )
         if grad.dim() == 1:
             if precondition_1d and grad.shape[0] <= max_precond_dim:
-                state["GG"][0].lerp_(
-                    grad.unsqueeze(1) @ grad.unsqueeze(0), 1 - state["shampoo_beta"]
-                )
+                outer = grad.unsqueeze(1) @ grad.unsqueeze(0)
+                if state["GG"][0].dtype != outer.dtype:
+                    state["GG"][0] = state["GG"][0].to(outer.dtype)
+                state["GG"][0].lerp_(outer, 1 - state["shampoo_beta"])
         else:
             if merge_dims:
                 new_grad = self.merge_dims(grad, max_precond_dim)
@@ -371,6 +372,8 @@ class SOAP(optim.Optimizer):
                             ]
                             * 2,
                         )
+                        if state["GG"][idx].dtype != outer_product.dtype:
+                            state["GG"][idx] = state["GG"][idx].to(outer_product.dtype)
                         state["GG"][idx].lerp_(outer_product, 1 - state["shampoo_beta"])
             else:
                 for idx, sh in enumerate(grad.shape):
@@ -382,6 +385,8 @@ class SOAP(optim.Optimizer):
                             dims=[[*chain(range(idx), range(idx + 1, len(grad.shape)))]]
                             * 2,
                         )
+                        if state["GG"][idx].dtype != outer_product.dtype:
+                            state["GG"][idx] = state["GG"][idx].to(outer_product.dtype)
                         state["GG"][idx].lerp_(outer_product, 1 - state["shampoo_beta"])
 
         if state["Q"] is None:

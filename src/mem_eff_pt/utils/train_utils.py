@@ -85,7 +85,7 @@ def build_optimizer(model, trainable_params, args):
     assert len(trainable_params) == count_merged + len(main_params_old) + len(oned_params)
 
 
-    elif args.optimizer.lower().find('soap')>=0:
+    if args.optimizer.lower().find('soap')>=0:
         opt_name = args.optimizer.lower()
         cast_dtype = torch.bfloat16
         if opt_name.find('_fp32')>=0:
@@ -164,7 +164,7 @@ def build_optimizer(model, trainable_params, args):
             cast_dtype=args.cast_dtype,
             shampoo_beta=-1 if args.shampoo_beta is None else args.shampoo_beta,
             sync=args.von_sync,
-            whiten_grad=args.whiten_evon_grad,
+            whiten_prec_grad=args.whiten_evon_grad,
             price_clip_ratio=args.price_clip_ratio,
             phasing=args.evon_phased_grads
         )

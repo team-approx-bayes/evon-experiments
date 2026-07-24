@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # Helper script to run CLIP finetuning using best downloaded hyperparameters.
 
