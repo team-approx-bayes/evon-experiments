@@ -5,6 +5,7 @@ import random
 import math
 import numpy as np
 import socket
+import signal
 from contextlib import nullcontext
 
 import torch
@@ -40,6 +41,30 @@ print("Script path:", script_dir)
 transformers.logging.set_verbosity_error()
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_flash_sdp(False)
+
+
+_PREEMPTION_REQUESTED = False
+
+
+def _request_preemption(signum, frame):
+    # Signal handlers should do the minimum possible work.
+    # The training loop will checkpoint at the next optimizer-step boundary.
+    global _PREEMPTION_REQUESTED
+    _PREEMPTION_REQUESTED = True
+
+
+def _install_preemption_handlers():
+    for sig_name in ("SIGTERM", "SIGINT", "SIGUSR1", "SIGUSR2"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            signal.signal(sig, _request_preemption)
+
+
+def _preemption_requested(device):
+    flag = torch.tensor(1 if _PREEMPTION_REQUESTED else 0, device=device, dtype=torch.int32)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    return bool(flag.item())
 
 
 def get_wd(step, wd_target, wd_anneal_steps):
@@ -137,6 +162,167 @@ def zero_optimizer_grads(opt):
             if p is not None:
                 p.grad = None
 
+
+
+def _checkpoint_model(model, args):
+    """Return the object whose state_dict/save_pretrained is checkpointed."""
+    peft_model = getattr(args, "peft_model", None)
+    if peft_model and peft_model.lower() in ["sltrain"]:
+        return model.wrapped_model
+    return model
+
+
+def _load_model_checkpoint(model, checkpoint_dir, args):
+    logger.info(f"Loading model from {checkpoint_dir}")
+    checkpoint_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
+    safetensors_file = os.path.join(checkpoint_dir, "model.safetensors")
+
+    if os.path.exists(checkpoint_path):
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+    elif os.path.exists(safetensors_file):
+        state_dict = load_file(safetensors_file)
+    else:
+        raise FileNotFoundError(
+            f"Could not find pytorch_model.bin or model.safetensors in {checkpoint_dir}"
+        )
+
+    _checkpoint_model(model, args).load_state_dict(state_dict, strict=True)
+    logger.info("Model successfully loaded (strict=True policy)")
+
+
+def _load_optimizer_and_scheduler_checkpoint(checkpoint_dir, opts, schedulers):
+    optimizer_checkpoint_path = os.path.join(checkpoint_dir, "optimizer.pt")
+    if not os.path.exists(optimizer_checkpoint_path):
+        raise FileNotFoundError(f"Missing optimizer checkpoint: {optimizer_checkpoint_path}")
+
+    optimizer_checkpoint = torch.load(optimizer_checkpoint_path, map_location="cpu")
+
+    if "optimizers" in optimizer_checkpoint:
+        if len(optimizer_checkpoint["optimizers"]) != len(opts):
+            raise ValueError(
+                f"Checkpoint has {len(optimizer_checkpoint['optimizers'])} optimizers, "
+                f"but current run built {len(opts)} optimizers. Check optimizer args/param groups."
+            )
+        for _optimizer, _optimizer_state in zip(opts, optimizer_checkpoint["optimizers"]):
+            _optimizer.load_state_dict(_optimizer_state)
+    elif "optimizer" in optimizer_checkpoint and len(opts) == 1:
+        opts[0].load_state_dict(optimizer_checkpoint["optimizer"])
+    else:
+        raise KeyError(
+            "optimizer.pt must contain `optimizers`, or legacy `optimizer` for a single optimizer."
+        )
+
+    if "schedulers" in optimizer_checkpoint:
+        if len(optimizer_checkpoint["schedulers"]) != len(schedulers):
+            raise ValueError(
+                f"Checkpoint has {len(optimizer_checkpoint['schedulers'])} schedulers, "
+                f"but current run built {len(schedulers)} schedulers. Check scheduler args."
+            )
+        for _scheduler, _scheduler_state in zip(schedulers, optimizer_checkpoint["schedulers"]):
+            _scheduler.load_state_dict(_scheduler_state)
+    elif "scheduler" in optimizer_checkpoint and len(schedulers) == 1:
+        schedulers[0].load_state_dict(optimizer_checkpoint["scheduler"])
+    else:
+        logger.warning("No scheduler state found in optimizer.pt; schedulers start fresh")
+
+    logger.info(f"Optimizer and scheduler restored from {checkpoint_dir}")
+
+
+def _load_training_state(checkpoint_dir):
+    state_path = os.path.join(checkpoint_dir, "training_state.json")
+    state = {
+        "global_step": 0,
+        "update_step": 0,
+        "tokens_seen": 0,
+        "tokens_seen_before": 0,
+        "count": 0,
+        "no_early_stop": True,
+    }
+    if not os.path.exists(state_path):
+        logger.warning(
+            f"Did not find training_state.json in {checkpoint_dir}; counters start from zero"
+        )
+        return state
+
+    logger.info(f"Loading training state from {state_path}")
+    with open(state_path) as f:
+        loaded_state = json.load(f)
+    state.update({k: loaded_state[k] for k in state.keys() if k in loaded_state})
+
+    logger.info(f"global_step       : {state['global_step']}")
+    logger.info(f"update_step       : {state['update_step']}")
+    logger.info(f"tokens_seen       : {state['tokens_seen']}")
+    logger.info(f"tokens_seen_before: {state['tokens_seen_before']}")
+    logger.info(f"count             : {state['count']}")
+    logger.info(f"no_early_stop     : {state['no_early_stop']}")
+    return state
+
+
+def _load_checkpoint(checkpoint_dir, model, opts, schedulers, args):
+    logger.info("*" * 40)
+    _load_model_checkpoint(model, checkpoint_dir, args)
+    _load_optimizer_and_scheduler_checkpoint(checkpoint_dir, opts, schedulers)
+    state = _load_training_state(checkpoint_dir)
+    logger.info(f"Will train for {args.num_training_steps - state['update_step']} update steps")
+    logger.info("*" * 40)
+    return state
+
+
+def _save_checkpoint(
+    current_model_directory,
+    model,
+    opts,
+    schedulers,
+    run_config,
+    args,
+    global_step,
+    update_step,
+    tokens_seen,
+    tokens_seen_before,
+    update_time,
+    count,
+    no_early_stop,
+):
+    logger.info(
+        f"Saving model and optimizer to {current_model_directory}, update step {update_step}"
+    )
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    model_to_save = model.module if hasattr(model, "module") else model
+    model_to_save.save_pretrained(
+        current_model_directory, max_shard_size="100GB"
+    )
+
+    optimizer_checkpoint = {
+        "optimizers": [opt.state_dict() for opt in opts],
+        "schedulers": [sch.state_dict() for sch in schedulers],
+        "update_step": update_step,
+        "global_step": global_step,
+        "config": run_config,
+        "wandb": wandb.run.dir if wandb.run is not None else None,
+        "dtype": args.dtype,
+    }
+    torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
+
+    training_state_checkpoint = {
+        "global_step": global_step,
+        "update_step": update_step,
+        "tokens_seen": tokens_seen,
+        "tokens_seen_before": tokens_seen_before,
+        "update_time": update_time,
+        "count": count,
+        "no_early_stop": no_early_stop,
+    }
+    with open(f"{current_model_directory}/training_state.json", "w") as f:
+        json.dump(training_state_checkpoint, f, indent=4)
+
+    if wandb.run is not None:
+        wandb_info = {
+            "wandb_id": wandb.run.id,
+        }
+        with open(f"{args.save_dir}/wandb.json", "w") as f:
+            json.dump(wandb_info, f, indent=4)
+
 @torch.no_grad()
 def evaluate_model(
     model,
@@ -178,6 +364,7 @@ def evaluate_model(
     target_eval_tokens = 10_000_000
     evaluated_on_tokens = 0
     total_loss = torch.tensor(0.0).to(device)
+    total_loss_mean = torch.tensor(0.0).to(device)
     total_batches = 1
     logger.info(f"Eval set prepared in {time.time() - _time:.2f} seconds")
 
@@ -211,9 +398,13 @@ def evaluate_model(
                     ignore_index=-100,
                 ).detach()
                 del avg_probs, shift_log_probs, shift_labels
+                total_loss += loss
+
+                loss_mean = model(**batch, labels=labels).loss.detach()
+                total_loss_mean += loss_mean
             else:
                 loss = model(**batch, labels=labels).loss.detach()
-            total_loss += loss
+                total_loss += loss
 
             evaluated_on_tokens += (batch["input_ids"] != pad_idx).sum().item() * world_size
     finally:
@@ -221,13 +412,22 @@ def evaluate_model(
             model.train()
 
     total_loss = total_loss / total_batches
+    if variational_optimizer is not None and mc_samples > 1:
+        total_loss_mean = total_loss_mean / total_batches
 
     # Gather losses across all GPUs
     gathered_losses = [torch.zeros_like(total_loss) for _ in range(world_size)]
     dist.all_gather(gathered_losses, total_loss)
     total_loss = sum([t.item() for t in gathered_losses]) / world_size
 
-    return total_loss, evaluated_on_tokens
+    if variational_optimizer is not None and mc_samples > 1:
+        gathered_losses_mean = [torch.zeros_like(total_loss_mean) for _ in range(world_size)]
+        dist.all_gather(gathered_losses_mean, total_loss_mean)
+        total_loss_mean = sum([t.item() for t in gathered_losses_mean]) / world_size
+    else:
+        total_loss_mean = None
+
+    return total_loss, total_loss_mean, evaluated_on_tokens
 
 
 def main(args):
@@ -249,6 +449,7 @@ def main(args):
 
     logger.info("Process group initialized")
     device = f"cuda:{local_rank}"
+    _install_preemption_handlers()
 
     if args.total_batch_size is not None:
         if args.gradient_accumulation is None:
@@ -287,9 +488,21 @@ def main(args):
             run_name = '%s_qkv3d'%opt_name
 
         run_name = "%s-T%d-%s" % (run_name, args.freq, socket.gethostname())
-        run = wandb.init(project=args.wandb_project_name, name=run_name,
-                tags=["normal"], entity="adrianrob1-Sapienza Università di Roma"
+
+        wandb_kwargs = dict(
+                project=args.wandb_project_name,
+                name=run_name,
+                tags=["normal"],
+                entity="adrianrob1-Sapienza Università di Roma",
                 )
+        if args.continue_from is not None:
+            wandb_info_path = os.path.join(os.path.dirname(args.continue_from), "wandb.json")
+            if os.path.exists(wandb_info_path):
+                with open(wandb_info_path) as f:
+                    wandb_info = json.load(f)
+                if "wandb_id" in wandb_info:
+                    wandb_kwargs.update(id=wandb_info["wandb_id"], resume="allow")
+        run = wandb.init(**wandb_kwargs)
         run.define_metric("test/*", step_metric="test/step")
         for k, v in vars(args).items():
             run.summary[f"args/{k}"] = _wandb_safe_value(v)
@@ -353,6 +566,8 @@ def main(args):
     update_step = 0
     tokens_seen = 0
     tokens_seen_before = 0
+    resume_count = 0
+    resume_no_early_stop = True
 
     # ====== starting config ======= #
     target_modules_list = ["attn", "mlp", "attention"]
@@ -419,67 +634,13 @@ def main(args):
         )
 
     if args.continue_from is not None:
-        assert False
-        '''
-        logger.info("*" * 40)
-        logger.info(f"Loading model from {args.continue_from}")
-        checkpoint_path = os.path.join(args.continue_from, "pytorch_model.bin")
-        
-        if not os.path.exists(checkpoint_path): #safetensors -> bin  
-            safetensors_file = os.path.join(args.continue_from, "model.safetensors")
-            state_dict = load_file(safetensors_file)
-            torch.save(state_dict, checkpoint_path)
- 
-            logger.info(f"safetensors {safetensors_file} converted to pytorch bin {checkpoint_path}")
-        
-        if args.peft_model.lower() in ["sltrain"]:
-            model.wrapped_model.load_state_dict(
-                torch.load(checkpoint_path, map_location="cpu"), strict=True
-            )
-        else:
-            model.load_state_dict(
-                torch.load(checkpoint_path, map_location="cpu"), strict=True
-            )
-        logger.info(f"Model successfully loaded (strict=True policy)")
-
-        optimizer_checkpoint = torch.load(
-            os.path.join(args.continue_from, "optimizer.pt"), map_location="cpu"
-        )
-        if "optimizers" in optimizer_checkpoint and len(optimizer_checkpoint["optimizers"]) == len(opts):
-            for _optimizer, _optimizer_state in zip(opts, optimizer_checkpoint["optimizers"]):
-                _optimizer.load_state_dict(_optimizer_state)
-        else:
-            optimizer.load_state_dict(optimizer_checkpoint["optimizer"])
-
-        if "schedulers" in optimizer_checkpoint and len(optimizer_checkpoint["schedulers"]) == len(schedulers):
-            for _scheduler, _scheduler_state in zip(schedulers, optimizer_checkpoint["schedulers"]):
-                _scheduler.load_state_dict(_scheduler_state)
-        else:
-            scheduler.load_state_dict(optimizer_checkpoint["scheduler"])
-        logger.info(f"Optimizer and scheduler restored from {args.continue_from}")
-
-        if os.path.exists(os.path.join(args.continue_from, "training_state.json")):
-            logger.info(
-                f"Loading training state like global_step, update_step, and tokens_seen from {args.continue_from}"
-            )
-            with open(os.path.join(args.continue_from, "training_state.json")) as f:
-                _old_state = json.load(f)
-            global_step = _old_state["global_step"]
-            update_step = _old_state["update_step"]
-            tokens_seen = _old_state["tokens_seen"]
-            tokens_seen_before = _old_state["tokens_seen_before"]
-            logger.info(f"global_step       : {global_step}")
-            logger.info(f"update_step       : {update_step}")
-            logger.info(f"tokens_seen       : {tokens_seen}")
-            logger.info(f"tokens_seen_before: {tokens_seen_before}")
-            logger.info(
-                f"Will train for {args.num_training_steps - update_step} update steps"
-            )
-        else:
-            logger.warning(
-                f"Did not find training state in {args.continue_from}, global step will start from zero"
-            )
-        logger.info("*" * 40)'''
+        checkpoint_state = _load_checkpoint(args.continue_from, model, opts, schedulers, args)
+        global_step = checkpoint_state["global_step"]
+        update_step = checkpoint_state["update_step"]
+        tokens_seen = checkpoint_state["tokens_seen"]
+        tokens_seen_before = checkpoint_state["tokens_seen_before"]
+        resume_count = checkpoint_state.get("count", 0)
+        resume_no_early_stop = checkpoint_state.get("no_early_stop", True)
 
     scheduler_start_step = update_step
 
@@ -552,10 +713,11 @@ def main(args):
     torch.cuda.reset_peak_memory_stats()
 
     boo = False
-    count = 0 #this should be saved in a checkpoint and reloaded from the checkpoint
-    no_early_stop = True #this should be saved in a checkpoint and reloaded from the checkpoint
+    count = resume_count
+    no_early_stop = resume_no_early_stop
+    preemption_exit = False
 
-    while update_step <= args.num_training_steps and no_early_stop:
+    while update_step <= args.num_training_steps and no_early_stop and not preemption_exit:
        data_shuffled = data.shuffle(seed=(seed_for_shuffle+count))
        count += 1
        if not args.single_gpu:
@@ -595,7 +757,7 @@ def main(args):
 
             if update_step == 0 and args.eval_at_begining :
                 logger.info(f"Performing evaluation at step {update_step}")
-                total_loss, evaluated_on_tokens = evaluate_model(
+                total_loss, total_loss_mean, evaluated_on_tokens = evaluate_model(
                     model,
                     preprocess_batched,
                     pad_idx,
@@ -613,12 +775,20 @@ def main(args):
                             "test/final_eval_perplexity": np.exp(total_loss),
                             "test/final_eval_tokens": evaluated_on_tokens
                             }
+                    if total_loss_mean is not None:
+                        log_info["test/final_eval_loss@mean"] = total_loss_mean
+                        log_info["test/final_eval_perplexity@mean"] = np.exp(total_loss_mean)
                     run.log(log_info,
                             step=wandb_log_step,
                             )
-                logger.info(
-                    f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)}"
-                )
+                if total_loss_mean is not None:
+                    logger.info(
+                        f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)} | at mean: {total_loss_mean}, {np.exp(total_loss_mean)}"
+                    )
+                else:
+                    logger.info(
+                        f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)}"
+                    )
 
             global_step += 1
             local_step += 1
@@ -653,7 +823,7 @@ def main(args):
 
             is_von_sync = (
                 variational_optimizer is not None
-                and getattr(variational_optimizer, "sync", False)
+                and (getattr(variational_optimizer, "sync", False))
                 and hasattr(model, "no_sync")
             )
 
@@ -668,29 +838,6 @@ def main(args):
                     loss = model(**batch, labels=labels).loss
                     loss.backward()
 
-            # context = (
-            #     variational_optimizer.sampled_params(train=True)
-            #     if variational_optimizer is not None
-            #     else nullcontext()
-            # )
-            # start_time = time.time()
-
-            # with context:
-            #     loss = model(**batch, labels=labels).loss
-            #     scaled_loss = loss 
-
-            #     if (
-            #         variational_optimizer is not None
-            #         and getattr(variational_optimizer, "sync", False)
-            #         and hasattr(model, "no_sync")
-            #     ):
-            #         # Optimizer performs distributed synchronization of MC statistics.
-            #         # Skip DDP gradient all-reduce during backward.
-            #         with model.no_sync():
-            #             scaled_loss.backward()
-            #     else:
-            #         scaled_loss.backward()
-
             if global_step % args.gradient_accumulation != 0:
                 continue
 
@@ -700,11 +847,12 @@ def main(args):
             else:
                 for g in opts[1].param_groups:
                     for p in g["params"]:
-                        p.grad /= args.gradient_accumulation
+                        if p.grad is not None:
+                            p.grad /= args.gradient_accumulation
 
             if (
                 variational_optimizer is not None
-                and getattr(variational_optimizer, "sync", False)
+                and (getattr(variational_optimizer, "sync", False))
             ):
                 # DDP all-reduce was skipped in backward for VON sync mode.
                 # Explicitly sync gradients of non-variational parameter groups.
@@ -739,57 +887,48 @@ def main(args):
             opt_update_time += time.time() - start_time 
             update_time = time.time() - update_time
 
-            # save checkpoint by save_every
-
-            if (
+            # save checkpoint by save_every, or immediately after an optimizer step if the scheduler/server asks the process to terminate.
+            preemption_now = _preemption_requested(device)
+            should_save_regular = (
                 local_step > args.gradient_accumulation
                 and update_step % args.save_every == 0
-                and global_rank == 0
-            ):
-                if args.keep_only_last_model:
+            )
+            should_save_preemption = preemption_now
+
+            if global_rank == 0 and (should_save_regular or should_save_preemption):
+                if should_save_preemption:
+                    current_model_directory = f"{args.save_dir}/model_preempt"
+                elif args.keep_only_last_model:
                     current_model_directory = f"{args.save_dir}/model_last"
                 else:
                     current_model_directory = f"{args.save_dir}/model_{update_step}"
-                logger.info(
-                    f"Saving model and optimizer to {current_model_directory}, update step {update_step}"
+                _save_checkpoint(
+                    current_model_directory,
+                    model,
+                    opts,
+                    schedulers,
+                    run_config,
+                    args,
+                    global_step,
+                    update_step,
+                    tokens_seen,
+                    tokens_seen_before,
+                    update_time,
+                    count,
+                    no_early_stop,
                 )
-                os.makedirs(args.save_dir, exist_ok=True)
-                model.module.save_pretrained(
-                    current_model_directory, max_shard_size="100GB"
-                )
 
-                optimizer_checkpoint = {
-                    "optimizers": [opt.state_dict() for opt in opts],
-                    "schedulers": [sch.state_dict() for sch in schedulers],
-                    "update_step": update_step,
-                    "global_step": global_step,
-                    "config": run_config,
-                    "wandb": wandb.run.dir,
-                    "dtype": args.dtype,
-                }
-                torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
-
-                training_state_checkpoint = {
-                    "global_step": global_step,
-                    "update_step": update_step,
-                    "tokens_seen": tokens_seen,
-                    "tokens_seen_before": tokens_seen_before,
-                    "update_time": update_time,
-                }
-                with open(f"{current_model_directory}/training_state.json", "w") as f:
-                    json.dump(training_state_checkpoint, f, indent=4)
-
-                # save wandb related info
-                wandb_info = {
-                    "wandb_id": wandb.run.id,
-                }
-                with open(f"{args.save_dir}/wandb.json", "w") as f:
-                    json.dump(wandb_info, f, indent=4)
+            if should_save_preemption:
+                if dist.is_available() and dist.is_initialized():
+                    dist.barrier()
+                logger.info("Preemption signal received; checkpoint saved at optimizer-step boundary. Exiting without final eval.")
+                preemption_exit = True
+                break
 
             # evaluation
             if update_step % args.eval_every == 0:
                 logger.info(f"Performing evaluation at step {update_step}")
-                total_loss, evaluated_on_tokens = evaluate_model(
+                total_loss, total_loss_mean, evaluated_on_tokens = evaluate_model(
                     model,
                     preprocess_batched,
                     pad_idx,
@@ -807,6 +946,9 @@ def main(args):
                             "test/final_eval_perplexity": np.exp(total_loss),
                             "test/final_eval_tokens": evaluated_on_tokens,
                             }
+                    if total_loss_mean is not None:
+                        log_info["test/final_eval_loss@mean"] = total_loss_mean
+                        log_info["test/final_eval_perplexity@mean"] = np.exp(total_loss_mean)
                     run.log(log_info,
                             step=wandb_log_step
                             )
@@ -829,9 +971,14 @@ def main(args):
                         elif total_loss> 3.1 and update_step>8000:
                             no_early_stop = False
 
-                logger.info(
-                    f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)}"
-                )
+                if total_loss_mean is not None:
+                    logger.info(
+                        f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)} | at mean: {total_loss_mean}, {np.exp(total_loss_mean)}"
+                    )
+                else:
+                    logger.info(
+                        f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)}"
+                    )
 
             lr = opts[0].param_groups[0]["lr"]
             tokens_in_update = tokens_seen - tokens_seen_before
@@ -883,7 +1030,9 @@ def main(args):
     # END of training loop
     # ##############################
     
-    if no_early_stop:
+    if preemption_exit:
+        logger.info("Training preempted after saving a checkpoint")
+    elif no_early_stop:
         logger.info("Training finished")
     else:
         logger.info("Training early stopped")
@@ -891,36 +1040,28 @@ def main(args):
     if global_rank == 0:
         pbar.close()
 
-    """
+    if preemption_exit:
+        logger.info("Skipping final evaluation because the job is terminating")
+        return
+
     current_model_directory = f"{args.save_dir}/model_{update_step}"
     if global_rank == 0 and not os.path.exists(current_model_directory):
-        logger.info(
-            f"Saving model and optimizer to {current_model_directory}, update step {update_step}"
+        _save_checkpoint(
+            current_model_directory,
+            model,
+            opts,
+            schedulers,
+            run_config,
+            args,
+            global_step,
+            update_step,
+            tokens_seen,
+            tokens_seen_before,
+            update_time,
+            count,
+            no_early_stop,
         )
-        os.makedirs(args.save_dir, exist_ok=True)
-        model.module.save_pretrained(current_model_directory)
 
-        optimizer_checkpoint = {
-            "optimizers": [opt.state_dict() for opt in opts],
-            "schedulers": [sch.state_dict() for sch in schedulers],
-            "update_step": update_step,
-            "global_step": global_step,
-            "config": run_config,
-            "wandb": wandb.run.dir,
-            "dtype": args.dtype,
-        }
-        torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
-
-        training_state_checkpoint = {
-            "global_step": global_step,
-            "update_step": update_step,
-            "tokens_seen": tokens_seen,
-            "tokens_seen_before": tokens_seen_before,
-            "update_time": update_time,
-        }
-        with open(f"{current_model_directory}/training_state.json", "w") as f:
-            json.dump(training_state_checkpoint, f, indent=4)
-    """
 
     # Final evaluation
     logger.info("Running final evaluation")
@@ -931,7 +1072,7 @@ def main(args):
     gc.collect()
     torch.cuda.empty_cache()
 
-    total_loss, evaluated_on_tokens = evaluate_model(
+    total_loss, total_loss_mean, evaluated_on_tokens = evaluate_model(
         model,
         preprocess_batched,
         pad_idx,
@@ -951,13 +1092,21 @@ def main(args):
                 "test/final_eval_tokens": evaluated_on_tokens,
                 'test/early_stop': early_stop
                 }
+        if total_loss_mean is not None:
+            log_info["test/final_eval_loss@mean"] = total_loss_mean
+            log_info["test/final_eval_perplexity@mean"] = np.exp(total_loss_mean)
         run.log(log_info,
                 step=wandb_log_step
                 )
 
-        logger.info(
-            f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)}"
-        )
+        if total_loss_mean is not None:
+            logger.info(
+                f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)} | at mean: {total_loss_mean}, {np.exp(total_loss_mean)}"
+            )
+        else:
+            logger.info(
+                f"Eval loss and perplexity at step {update_step}: {total_loss}, {np.exp(total_loss)}"
+            )
 
     logger.info("Script finished successfully")
     print(f"Rank {global_rank} finished successfully")
