@@ -664,6 +664,7 @@ def main() -> None:
             "test_acc": test_acc,
         })
 
+        should_early_stop = False
         if test_loss + 1e-8 < best_test_loss:
             best_test_loss = test_loss
             epochs_no_improve = 0
@@ -674,10 +675,10 @@ def main() -> None:
                     f"[early-stop] No test loss improvement for {patience} epochs "
                     f"(best={best_test_loss:.4f}). Stopping at epoch {epoch}."
                 )
-                break
+                should_early_stop = True
 
         # Save Checkpoint
-        if epoch in checkpoint_epochs:
+        if not args.disable_checkpointing and (epoch in checkpoint_epochs or should_early_stop):
             ckpt_path = ckpt_dir / f"epoch_{epoch}.pt"
             torch.save(
                 {
@@ -696,6 +697,9 @@ def main() -> None:
                 ckpt_path,
             )
             tqdm.write(f"  [ckpt] Saved local checkpoint: {ckpt_path}")
+
+        if should_early_stop:
+            break
 
     # Monte Carlo samples evaluation
     if hasattr(optimizer, "sampled_params"):

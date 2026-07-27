@@ -1,21 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=finetune_best_hparams
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-#SBATCH --time=1-00:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-gpu=8
-#SBATCH --gres=gpu:1
-#SBATCH --account=IscrC_SPEND
-#SBATCH --mem-per-gpu=64G
-#SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
-
-export HF_DATASETS_CACHE=/leonardo_scratch/large/userexternal/rminut00/adrian/hf_datasets
-export HF_HUB_CACHE=/leonardo_scratch/large/userexternal/rminut00/adrian/hf_hub
-export HF_HOME=/leonardo_scratch/large/userexternal/rminut00/adrian/hf_home
+export CUDA_VISIBLE_DEVICES=2,3
 
 # ── Configuration
 MODEL_NAME="${MODEL_NAME:-vit_base_patch16_224.openai_clip}"
@@ -31,8 +16,6 @@ ENABLE_PHASING="${ENABLE_PHASING:-}"
 PRICE_CLIP_RATIO="${PRICE_CLIP_RATIO:-}"
 DISABLE_CHECKPOINTING="${DISABLE_CHECKPOINTING:-}"
 
-source ~/.bashrc
-
 # Change to the directory where this script is located
 cd "$(dirname "$0")" || exit 1
 
@@ -44,18 +27,17 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # Usually we use the virtual environment activated before submitting, or a global/project env.
 if [ -d "../.venv" ]; then
     unset PYTHONPATH
-    source ../.venv/bin/activate
+    VIRTUAL_ENV="$(cd ../.venv && pwd)"
+    export VIRTUAL_ENV
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+    source "$VIRTUAL_ENV/bin/activate"
 elif [ -d "../../.venv" ]; then
     unset PYTHONPATH
-    source ../../.venv/bin/activate
+    VIRTUAL_ENV="$(cd ../../.venv && pwd)"
+    export VIRTUAL_ENV
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+    source "$VIRTUAL_ENV/bin/activate"
 fi
-
-# Use a temporary directory for WandB to prevent local disk space from filling up
-export WANDB_DIR
-WANDB_DIR=$(mktemp -d)
-export WANDB_CACHE_DIR="$WANDB_DIR/cache"
-mkdir -p "$WANDB_CACHE_DIR"
-trap "rm -rf $WANDB_DIR" EXIT
 
 CMD=(
     bash run_finetune.sh

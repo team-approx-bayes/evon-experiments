@@ -23,10 +23,16 @@ DISABLE_CHECKPOINTING=""
 
 if [ -d "../.venv" ]; then
     unset PYTHONPATH
-    source ../.venv/bin/activate
+    VIRTUAL_ENV="$(cd ../.venv && pwd)"
+    export VIRTUAL_ENV
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+    source "$VIRTUAL_ENV/bin/activate"
 elif [ -d "../../.venv" ]; then
     unset PYTHONPATH
-    source ../../.venv/bin/activate
+    VIRTUAL_ENV="$(cd ../../.venv && pwd)"
+    export VIRTUAL_ENV
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+    source "$VIRTUAL_ENV/bin/activate"
 fi
 
 while [[ $# -gt 0 ]]; do
