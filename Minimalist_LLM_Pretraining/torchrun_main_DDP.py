@@ -493,7 +493,6 @@ def main(args):
                 project=args.wandb_project_name,
                 name=run_name,
                 tags=["normal"],
-                entity="adrianrob1-Sapienza Università di Roma",
                 )
         if args.continue_from is not None:
             wandb_info_path = os.path.join(os.path.dirname(args.continue_from), "wandb.json")

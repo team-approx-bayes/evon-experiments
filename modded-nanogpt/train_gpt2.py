@@ -548,7 +548,6 @@ if master_process and wandb is not None:
         project=args.experiment,
         name=run_name,
         tags=["normal", "hess_hist"] if args.collect_stats else ["normal"],
-        entity="adrianrob1-Sapienza Università di Roma",
         config=args,
     )
     if wandb_id:

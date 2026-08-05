@@ -1,7 +1,5 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=2,3
-
 # ── Configuration
 MODEL_NAME="${MODEL_NAME:-vit_base_patch16_224.openai_clip}"
 DATASET="${DATASET:-mnist}"
