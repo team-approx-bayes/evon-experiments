@@ -1278,9 +1278,6 @@ for step in range(resume_start_step, args.num_iterations + 1):
             "train_time": approx_time,
         }
 
-        if hasattr(optimizer2, "get_kl"):
-            log_data["kl_div"] = optimizer2.get_kl(omit_constants=True)
-
         if torch.isnan(train_loss):
             assert False, "NaN loss detected"
 
