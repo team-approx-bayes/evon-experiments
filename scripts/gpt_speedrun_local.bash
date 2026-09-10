@@ -16,6 +16,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_VISIBLE_DEVICES=0
 
 # EVON with whitening
-uv run python -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt2.py --experiment=nanoGPT --batch_size_pre_gpu=32 --n_embd=768 --mlp_ratio=4 --n_head=6 --attn_ratio=1 --is_merged=false --opt=evon --momentum=0.9 --cast_dtype=float32 --damping=1e-10 --debias_second_moment=False --schd=linear --evon_noise_damping=0 --whiten_evon_grad=True --mc_samples=1 --decoupled_wd=False --ess=5266386.597665445 --evon_phased_grads=True --ivon_hess_init=0.581980713452398 --lr=0.0172353632 --lr_cov=0.0009120067230437592 --momentum=0.943040091284246 --price_clip_ratio=1.5 --shampoo_beta=0.995 --weight_decay=0.000001 --save_every=1000 #--resume_from=checkpoints/nanoGPT/latest.pt 
+uv run python -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt2.py --experiment=nanoGPT --batch_size_pre_gpu=32 --n_embd=768 --mlp_ratio=4 --n_head=6 --attn_ratio=1 --is_merged=false --opt=evon --momentum=0.9 --cast_dtype=float32 --damping=1e-10 --debias_second_moment=False --schd=linear --evon_noise_damping=0 --whiten_evon_grad=True --mc_samples=1 --decoupled_wd=False --ess=5266386.597665445 --evon_phased_grads=True --ivon_hess_init=0.581980713452398 --lr=0.0172353632 --lr_cov=0.0009120067230437592 --momentum=0.943040091284246 --price_clip_ratio=1.5 --shampoo_beta=0.995 --weight_decay=0.000001 --save_every=1000 #--resume_from=checkpoints/nanoGPT/latest.pt
+
+# IVON
+uv run python -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt2.py --experiment=nanoGPT --batch_size_pre_gpu=32 --n_embd=768 --mlp_ratio=4 --n_head=6 --attn_ratio=1 --is_merged=false --opt=ivon --cast_dtype=float32 --damping=1e-10 --debias_second_moment=False --schd=linear --mc_samples=20 --ess=46601517.06710787 --ivon_clip_radius=0.0000117647 --ivon_hess_init=0.018051058888231327 --lr=1213.6362600282193 --lr_cov=0.00012261043299307495 --momentum=0.890209876289905 --weight_decay=0.0000020278356251559766 --save_every=1000
 
 echo "Job completed."
