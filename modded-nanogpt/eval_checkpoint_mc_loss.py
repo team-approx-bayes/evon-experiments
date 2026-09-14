@@ -272,6 +272,7 @@ def build_sampling_optimizer(model, ckpt_args, opt_name):
     if "evon" in opt_name:
         shampoo_beta = ckpt_args.get("shampoo_beta", None)
         cast_dtype = cast_dtype_from_string(ckpt_args.get("cast_dtype", "bfloat16"))
+        # Kwargs mirror the EVON construction in train_gpt2.py.
         return EVON(
             model.transformer.h.parameters(),
             lr=float(ckpt_args.get("lr", 2e-2)),
@@ -281,23 +282,18 @@ def build_sampling_optimizer(model, ckpt_args, opt_name):
             ),
             hess_init=float(ckpt_args.get("ivon_hess_init", 0.001)),
             precondition_frequency=int(ckpt_args.get("T", 10)),
-            prec_clip_radius=float(ckpt_args.get("ivon_clip_radius", float("inf"))),
-            upd_grad_clip_radius=float(ckpt_args.get("ivon_clip_radius", float("inf"))),
-            decoupled_wd=bool(ckpt_args.get("decoupled_wd", False)),
-            debias_second_moment=bool(ckpt_args.get("debias_second_moment", False)),
+            debias_beta2=bool(ckpt_args.get("debias_second_moment", False)),
             ess=float(ckpt_args.get("ess", 1e9)),
             correct_bias=True,
             eps=float(ckpt_args.get("damping", 1e-8)),
             max_precond_dim=int(ckpt_args.get("max_precond_dim", 10000)),
             weight_decay=float(ckpt_args.get("weight_decay", 1e-4)),
-            precondition_1d=False,
             cast_dtype=cast_dtype,
             shampoo_beta=-1 if shampoo_beta is None else float(shampoo_beta),
-            enable_alternating_grads=bool(ckpt_args.get("evon_phased_grads", False)),
+            phasing=bool(ckpt_args.get("evon_phased_grads", False)),
             price_clip_ratio=ckpt_args.get("price_clip_ratio", None),
-            collect_clip_stats=bool(ckpt_args.get("collect_stats", False)),
-            noise_damping=float(ckpt_args.get("evon_noise_damping", 0.0)),
             sync=bool(ckpt_args.get("von_sync", True)),
+            whiten_prec_grad=bool(ckpt_args.get("whiten_evon_grad", True)),
         )
 
     raise ValueError(f"Only EVON and IVON are supported. Got opt={opt_name}")
@@ -427,6 +423,17 @@ def main():
     optimizer_state = checkpoint["optimizers"][-1]
     optimizer2.load_state_dict(optimizer_state)
     move_optimizer_state_to_device(optimizer2, device)
+
+    # Eval-only phasing override: checkpoints saved at an even step with
+    # phasing=True would land in the clean phase (zero noise) for every
+    # MC sample, making MC-BMA a no-op. Disable phasing in the in-memory
+    # loaded state so MC samples always draw real posterior noise.
+    if any(group.get("phasing") for group in optimizer2.param_groups):
+        for group in optimizer2.param_groups:
+            if group.get("phasing"):
+                group["phasing"] = False
+        if master_process:
+            print("NOTE: EVON phasing disabled for eval (phasing=True in checkpoint); MC samples will use real posterior noise.")
 
     loader = DistributedDataLoader(
         filename_pattern=input_val_bin,

@@ -57,6 +57,8 @@ PROGRESS="${PROGRESS:-true}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 QKV_MODE="${QKV_MODE:-}"
 ATTN_RATIO="${ATTN_RATIO:-}"
+TEMPERATURE="${TEMPERATURE:-}"
+TEMPERATURE_LIST="${TEMPERATURE_LIST:-}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 
 if [[ -n "${DATASET_PATH}" ]]; then
@@ -119,6 +121,14 @@ fi
 
 if [[ -n "${ATTN_RATIO}" ]]; then
   args+=(--attn_ratio "${ATTN_RATIO}")
+fi
+
+if [[ -n "${TEMPERATURE}" ]]; then
+  args+=(--temperature "${TEMPERATURE}")
+fi
+
+if [[ -n "${TEMPERATURE_LIST}" ]]; then
+  args+=(--temperature_list "${TEMPERATURE_LIST}")
 fi
 
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then

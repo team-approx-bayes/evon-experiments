@@ -1,0 +1,5 @@
+checkpoint,checkpoint_basename,optimizer,run_label,step,mc_samples,val_tokens,temperature,mc_bma_nll,mean_posterior_nll
+/home/adrianrob/.t3/worktrees/evon-experiments-gh/t3code-8920b60f/checkpoints/for_adrian/model_60001,model_60001,evon,train_T1.6,60001,1,2000000,1.6,2.79929281,2.79576907
+/home/adrianrob/.t3/worktrees/evon-experiments-gh/t3code-8920b60f/checkpoints/for_adrian/model_60001,model_60001,evon,train_T1.6,60001,4,2000000,1.6,2.79622529,2.79576907
+/home/adrianrob/.t3/worktrees/evon-experiments-gh/t3code-8920b60f/checkpoints/for_adrian/model_60001,model_60001,evon,train_T1.6,60001,16,2000000,1.6,2.79549034,2.79576907
+/home/adrianrob/.t3/worktrees/evon-experiments-gh/t3code-8920b60f/checkpoints/for_adrian/model_60001,model_60001,evon,train_T1.6,60001,32,2000000,1.6,2.79537876,2.79576907

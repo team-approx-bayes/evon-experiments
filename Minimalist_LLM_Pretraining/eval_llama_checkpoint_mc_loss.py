@@ -25,6 +25,7 @@ from vonsoap.eval_utils import (
     cast_dtype_from_string,
     move_optimizer_state_to_device,
     parse_mc_samples_list,
+    parse_temperature_list,
     sampled_params_context,
     str2bool,
 )
@@ -290,12 +291,25 @@ def parse_args():
         default=25,
         help="Fallback text progress update frequency in eval steps.",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=float(os.environ.get("TEMPERATURE", "1.0")),
+        help="Posterior temperature T for EVON/IVON MC-BMA sampling: sampled noise std is scaled by sqrt(T).",
+    )
+    parser.add_argument(
+        "--temperature_list",
+        type=str,
+        default=os.environ.get("TEMPERATURE_LIST", ""),
+        help="Comma-separated posterior temperatures, e.g. 0.5,1,2,5. Overrides --temperature.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     mc_values = parse_mc_samples_list(args.mc_samples_list, args.mc_samples)
+    temperature_values = parse_temperature_list(args.temperature_list, args.temperature)
 
     use_ddp, ddp_rank, ddp_local_rank, ddp_world_size = _get_ddp_state()
 
@@ -418,6 +432,31 @@ def main():
             f"MC samples > 1 require a checkpoint that saved the variational optimizer separately."
         )
 
+    # Posterior temperature for MC-BMA sampling: scale the sampled
+    # noise std by sqrt(T), i.e. sample theta ~ N(mean, T * Sigma_post).
+    # Supported by EVON and IVON (both implement _sample_params). The
+    # temperature itself is set per sweep value inside run_eval() below.
+    if variational_optimizer is not None and hasattr(variational_optimizer, "_sample_params"):
+        # Eval-only phasing override: checkpoints saved at an even step with
+        # phasing=True would land in the clean phase (zero noise) for every
+        # MC sample, making MC-BMA a no-op. Disable phasing in the in-memory
+        # loaded state so MC samples always draw real posterior noise.
+        if any(group.get("phasing") for group in variational_optimizer.param_groups):
+            for group in variational_optimizer.param_groups:
+                if group.get("phasing"):
+                    group["phasing"] = False
+            if master_process:
+                print("NOTE: EVON phasing disabled for eval (phasing=True in checkpoint); MC samples will use real posterior noise.")
+    elif any(t != 1.0 for t in temperature_values) and master_process:
+        opt_desc = (
+            type(variational_optimizer).__name__ if variational_optimizer is not None else "no variational optimizer"
+        )
+        print(
+            f"WARNING: temperature(s) "
+            f"{','.join(f'{t:g}' for t in temperature_values if t != 1.0)} "
+            f"ignored by {opt_desc} (only EVON/IVON support posterior temperature)."
+        )
+
     batch_size = args.batch_size
     if batch_size is None:
         batch_size = int(optimizer_config.get("batch_size", 64)) if optimizer_config else 64
@@ -481,10 +520,6 @@ def main():
     max_mc = mc_values_sorted[-1]
     eval_steps = math.ceil(args.val_tokens / (batch_size * max_length * ddp_world_size))
 
-    total_nll_by_mc = {mc: 0.0 for mc in mc_values_sorted}
-    total_nll_mean = 0.0
-    total_count = 0
-
     progress_enabled = args.progress and master_process
     try:
         from tqdm.auto import tqdm
@@ -495,84 +530,108 @@ def main():
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
 
-    with torch.no_grad():
-        if progress_enabled and tqdm is not None:
-            progress = tqdm(total=eval_steps, desc="eval", dynamic_ncols=True)
-        else:
-            progress = SimpleProgress(
-                total=eval_steps,
-                desc="eval",
-                enabled=progress_enabled,
-                every=args.progress_every,
-            )
+    def run_eval(temperature):
+        """Evaluate per-MC BMA NLL at one posterior temperature.
 
-        for batch in val_data_mapped.batch(batch_size=batch_size):
-            if total_count >= args.val_tokens:
-                break
+        Re-iterates the validation loader from the start for each temperature;
+        iteration order is deterministic, so rows across temperatures stay
+        paired.
+        """
+        # EVON reads .temperature at sampling time, so flipping it here is
+        # enough; no optimizer rebuild needed.
+        if variational_optimizer is not None and hasattr(
+            variational_optimizer, "_sample_params"
+        ):
+            variational_optimizer.temperature = temperature
 
-            batch = {k: v.to(device) for k, v in batch.items()}
-            labels = batch["input_ids"].clone()
-            labels[labels == tokenizer.pad_token_id] = -100
-            targets = labels[..., 1:].contiguous()
-            count = int((targets != -100).sum().item())
+        total_nll_by_mc = {mc: 0.0 for mc in mc_values_sorted}
+        total_nll_mean = 0.0
+        total_count = 0
 
-            with get_amp_ctx():
-                logits_mean = model(**batch).logits
-
-            log_probs_mean = F.log_softmax(logits_mean[..., :-1, :].float(), dim=-1)
-            nll_sum_mean = F.nll_loss(
-                log_probs_mean.view(-1, log_probs_mean.size(-1)),
-                targets.view(-1),
-                ignore_index=-100,
-                reduction="sum",
-            )
-            total_nll_mean += float(nll_sum_mean.item())
-
-            if variational_optimizer is None:
-                for mc in mc_values_sorted:
-                    total_nll_by_mc[mc] += float(nll_sum_mean.item())
+        with torch.no_grad():
+            if progress_enabled and tqdm is not None:
+                progress = tqdm(total=eval_steps, desc=f"eval T={temperature:g}", dynamic_ncols=True)
             else:
-                sum_probs = None
-                for mc_idx in range(1, max_mc + 1):
-                    with sampled_params_context(variational_optimizer, train=False):
-                        with get_amp_ctx():
-                            logits = model(**batch).logits
-                        probs = F.softmax(logits.float(), dim=-1)
-                        sum_probs = probs if sum_probs is None else (sum_probs + probs)
+                progress = SimpleProgress(
+                    total=eval_steps,
+                    desc=f"eval T={temperature:g}",
+                    enabled=progress_enabled,
+                    every=args.progress_every,
+                )
 
-                    if mc_idx in mc_values_set:
-                        avg_probs = sum_probs / mc_idx
-                        log_avg_probs = avg_probs[..., :-1, :].clamp_min(1e-12).log()
-                        nll_sum = F.nll_loss(
-                            log_avg_probs.view(-1, log_avg_probs.size(-1)),
-                            targets.view(-1),
-                            ignore_index=-100,
-                            reduction="sum",
-                        )
-                        total_nll_by_mc[mc_idx] += float(nll_sum.item())
+            for batch in val_data_mapped.batch(batch_size=batch_size):
+                if total_count >= args.val_tokens:
+                    break
 
-            total_count += count
-            progress.update(1)
-        progress.close()
+                batch = {k: v.to(device) for k, v in batch.items()}
+                labels = batch["input_ids"].clone()
+                labels[labels == tokenizer.pad_token_id] = -100
+                targets = labels[..., 1:].contiguous()
+                count = int((targets != -100).sum().item())
 
-    if use_ddp:
-        total_nll_mean_t = torch.tensor(total_nll_mean, device=device, dtype=torch.float64)
-        total_count_t = torch.tensor(total_count, device=device, dtype=torch.float64)
-        dist.all_reduce(total_nll_mean_t, op=dist.ReduceOp.SUM)
-        dist.all_reduce(total_count_t, op=dist.ReduceOp.SUM)
-        total_nll_mean = float(total_nll_mean_t.item())
-        total_count = int(total_count_t.item())
+                with get_amp_ctx():
+                    logits_mean = model(**batch).logits
 
-        for mc in mc_values_sorted:
-            total_nll_t = torch.tensor(total_nll_by_mc[mc], device=device, dtype=torch.float64)
-            dist.all_reduce(total_nll_t, op=dist.ReduceOp.SUM)
-            total_nll_by_mc[mc] = float(total_nll_t.item())
+                log_probs_mean = F.log_softmax(logits_mean[..., :-1, :].float(), dim=-1)
+                nll_sum_mean = F.nll_loss(
+                    log_probs_mean.view(-1, log_probs_mean.size(-1)),
+                    targets.view(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+                total_nll_mean += float(nll_sum_mean.item())
 
-    if total_count == 0:
-        raise RuntimeError("No valid targets encountered (all ignore_index).")
+                if variational_optimizer is None:
+                    for mc in mc_values_sorted:
+                        total_nll_by_mc[mc] += float(nll_sum_mean.item())
+                else:
+                    sum_probs = None
+                    for mc_idx in range(1, max_mc + 1):
+                        with sampled_params_context(variational_optimizer, train=False):
+                            with get_amp_ctx():
+                                logits = model(**batch).logits
+                            probs = F.softmax(logits.float(), dim=-1)
+                            sum_probs = probs if sum_probs is None else (sum_probs + probs)
 
-    mc_bma_nll_by_mc = {mc: total_nll_by_mc[mc] / total_count for mc in mc_values_sorted}
-    mean_posterior_nll = total_nll_mean / total_count
+                        if mc_idx in mc_values_set:
+                            avg_probs = sum_probs / mc_idx
+                            log_avg_probs = avg_probs[..., :-1, :].clamp_min(1e-12).log()
+                            nll_sum = F.nll_loss(
+                                log_avg_probs.view(-1, log_avg_probs.size(-1)),
+                                targets.view(-1),
+                                ignore_index=-100,
+                                reduction="sum",
+                            )
+                            total_nll_by_mc[mc_idx] += float(nll_sum.item())
+
+                total_count += count
+                progress.update(1)
+            progress.close()
+
+        if use_ddp:
+            total_nll_mean_t = torch.tensor(total_nll_mean, device=device, dtype=torch.float64)
+            total_count_t = torch.tensor(total_count, device=device, dtype=torch.float64)
+            dist.all_reduce(total_nll_mean_t, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_count_t, op=dist.ReduceOp.SUM)
+            total_nll_mean = float(total_nll_mean_t.item())
+            total_count = int(total_count_t.item())
+
+            for mc in mc_values_sorted:
+                total_nll_t = torch.tensor(total_nll_by_mc[mc], device=device, dtype=torch.float64)
+                dist.all_reduce(total_nll_t, op=dist.ReduceOp.SUM)
+                total_nll_by_mc[mc] = float(total_nll_t.item())
+
+        if total_count == 0:
+            raise RuntimeError("No valid targets encountered (all ignore_index).")
+
+        mc_bma_nll_by_mc = {mc: total_nll_by_mc[mc] / total_count for mc in mc_values_sorted}
+        mean_posterior_nll = total_nll_mean / total_count
+        return mean_posterior_nll, mc_bma_nll_by_mc
+
+    # One full val pass per posterior temperature: (T, mean_nll, {mc: nll}).
+    results = [
+        (temperature, *run_eval(temperature)) for temperature in temperature_values
+    ]
 
     optimizer_name = str(optimizer_config.get("optimizer", "unknown")).lower()
     step = "unknown"
@@ -610,6 +669,7 @@ def main():
         "step",
         "mc_samples",
         "val_tokens",
+        "temperature",
         "mc_bma_nll",
         "mean_posterior_nll",
     ]
@@ -623,30 +683,35 @@ def main():
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if write_header:
                 writer.writeheader()
-            for mc in mc_values:
-                writer.writerow(
-                    {
-                        "checkpoint": checkpoint_dir,
-                        "checkpoint_basename": checkpoint_basename,
-                        "optimizer": optimizer_name,
-                        "run_label": run_label,
-                        "step": step,
-                        "mc_samples": mc,
-                        "val_tokens": args.val_tokens,
-                        "mc_bma_nll": f"{mc_bma_nll_by_mc[mc]:.8f}",
-                        "mean_posterior_nll": f"{mean_posterior_nll:.8f}",
-                    }
-                )
+            for temperature, mean_posterior_nll, mc_bma_nll_by_mc in results:
+                for mc in mc_values:
+                    writer.writerow(
+                        {
+                            "checkpoint": checkpoint_dir,
+                            "checkpoint_basename": checkpoint_basename,
+                            "optimizer": optimizer_name,
+                            "run_label": run_label,
+                            "step": step,
+                            "mc_samples": mc,
+                            "val_tokens": args.val_tokens,
+                            "temperature": f"{temperature:g}",
+                            "mc_bma_nll": f"{mc_bma_nll_by_mc[mc]:.8f}",
+                            "mean_posterior_nll": f"{mean_posterior_nll:.8f}",
+                        }
+                    )
 
         print("checkpoint:", checkpoint_dir)
         print("optimizer:", optimizer_name)
         print("step:", step)
         print("mc_samples_list:", ",".join(str(v) for v in mc_values))
         print("val_tokens:", args.val_tokens)
+        print("temperature_list:", ",".join(f"{t:g}" for t in temperature_values))
         print("world_size:", ddp_world_size)
-        print("mean_posterior_nll:", f"{mean_posterior_nll:.8f}")
-        for mc in mc_values:
-            print(f"mc_bma_nll@{mc}:", f"{mc_bma_nll_by_mc[mc]:.8f}")
+        for temperature, mean_posterior_nll, mc_bma_nll_by_mc in results:
+            print(f"temperature={temperature:g}")
+            print("  mean_posterior_nll:", f"{mean_posterior_nll:.8f}")
+            for mc in mc_values:
+                print(f"  mc_bma_nll@{mc}:", f"{mc_bma_nll_by_mc[mc]:.8f}")
         print("csv_out:", csv_out)
 
     if use_ddp:

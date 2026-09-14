@@ -1,3 +1,4 @@
+import math
 from math import pow
 from typing import Callable, Optional, Tuple
 from contextlib import contextmanager
@@ -74,6 +75,13 @@ class IVON(torch.optim.Optimizer):
         self.current_step = 0
         self.debias = debias
         self.rescale_lr = rescale_lr
+        # Posterior temperature T: scale the sampled noise std by sqrt(T),
+        # i.e. sample theta ~ N(mean, T * Sigma_post). T = 1.0 reproduces
+        # the unscaled posterior. Not a constructor parameter so that
+        # state_dict contents and checkpoint compat are unaffected. Intended
+        # for MC-BMA evaluation; scaling the noise also scales the Price
+        # estimator input, so leave at 1.0 for training.
+        self.temperature: float = 1.0
 
         # set initial temporary running averages
         self._reset_samples()
@@ -195,6 +203,10 @@ class IVON(torch.optim.Optimizer):
                 torch.randn(gnumel, device=self._device, dtype=self._dtype)
                 / (group["ess"] * (group["hess"] + group["weight_decay"])).sqrt()
             )
+            # Posterior temperature T: scale the posterior noise std by
+            # sqrt(T), i.e. sample from N(mean, T * Sigma_post).
+            if self.temperature != 1.0:
+                noise_sample = noise_sample.mul(math.sqrt(self.temperature))
             noise_samples.append(noise_sample)
 
             goffset = 0

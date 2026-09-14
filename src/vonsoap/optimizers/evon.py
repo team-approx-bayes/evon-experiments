@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import chain
+import math
 
 import torch
 import torch.distributed as dist
@@ -133,6 +134,11 @@ class EVON(Optimizer):
         self._phasing = phasing
         self._price_clip_ratio = price_clip_ratio
         self.sync = sync
+        # Posterior temperature T: scale the sampled noise std by sqrt(T),
+        # i.e. sample theta ~ N(mean, T * Sigma_post). T = 1.0 reproduces
+        # the unscaled posterior. Not a constructor parameter so that
+        # state_dict contents and checkpoint compat are unaffected.
+        self.temperature: float = 1.0
         self._whiten_prec_grad = whiten_prec_grad
         self._debias_beta2 = debias_beta2
 
@@ -534,7 +540,10 @@ class EVON(Optimizer):
     def _sample_params(self, train: bool = True) -> None:
         """Perturb each parameter with noise sampled from the approximate posterior.
 
-        Noise is drawn as ``epsilon ~ N(0, 1 / (ess * (h + wd)))``.
+        Noise is drawn as ``epsilon ~ N(0, 1 / (ess * (h + wd)))``. When
+        ``self.temperature != 1.0``, the noise std is scaled by
+        ``sqrt(temperature)`` (posterior temperature T: sample from
+        ``N(mean, T * Sigma_post)``).
 
         Persistent state added by this method:
 
@@ -578,6 +587,10 @@ class EVON(Optimizer):
                     # h_mom.add(wd) returns a new tensor, so h_mom is never mutated
                     denom = h_mom.add(wd).mul_(ess).sqrt_()
                     noise = torch.empty_like(h_mom).normal_().div_(denom)
+                    # Posterior temperature T: scale the posterior noise std
+                    # by sqrt(T), i.e. sample from N(mean, T * Sigma_post).
+                    if self.temperature != 1.0:
+                        noise.mul_(math.sqrt(self.temperature))
 
                 if train:
                     self._noises[id(p)] = noise

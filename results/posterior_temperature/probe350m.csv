@@ -1,0 +1,3 @@
+checkpoint,checkpoint_basename,optimizer,run_label,step,mc_samples,val_tokens,temperature,mc_bma_nll,mean_posterior_nll
+/home/adrianrob/.t3/worktrees/evon-experiments-gh/t3code-8920b60f/checkpoints/for_adrian/model_60001,model_60001,evon,llama350m_fix_probe,60001,1,100000,1,2.83539164,2.83346393
+/home/adrianrob/.t3/worktrees/evon-experiments-gh/t3code-8920b60f/checkpoints/for_adrian/model_60001,model_60001,evon,llama350m_fix_probe,60001,4,100000,1,2.83340919,2.83346393

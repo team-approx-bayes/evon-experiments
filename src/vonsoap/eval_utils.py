@@ -44,6 +44,34 @@ def parse_mc_samples_list(mc_samples_list_str, fallback_mc_samples):
     return deduped
 
 
+def parse_temperature_list(temperature_list_str, fallback_temperature):
+    if not str(temperature_list_str).strip():
+        if fallback_temperature <= 0:
+            raise ValueError("--temperature must be > 0")
+        return [fallback_temperature]
+
+    values = []
+    for tok in str(temperature_list_str).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        value = float(tok)
+        if value <= 0:
+            raise ValueError("All temperatures must be > 0")
+        values.append(value)
+
+    if not values:
+        raise ValueError("--temperature_list did not contain valid values")
+
+    deduped = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return deduped
+
+
 class SimpleProgress:
     def __init__(self, total, desc, enabled=True, every=25):
         self.total = max(1, int(total))
