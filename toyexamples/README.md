@@ -51,12 +51,12 @@ Trains a small and a larger MLP with both IVON and EVON on a simple 1D regressio
 Expected output of `uv run demo_hmc.py`. 
 
 Small Tanh-MLP, EVON (left) vs IVON (right) <br>
-<img src="figures/demo_inbetween_small_evon.png" width="300" style="background-color: white;">
-<img src="figures/demo_inbetween_small_ivon.png" width="300" style="background-color: white;">
+<img src="figures/demo_inbetween_small_evon.png" width="300">
+<img src="figures/demo_inbetween_small_ivon.png" width="300">
 
 Big ELU-MLP, EVON (left) vs IVON (right) <br> 
-<img src="figures/demo_inbetween_large_evon.png" width="300" style="background-color: white;">
-<img src="figures/demo_inbetween_large_ivon.png" width="300" style="background-color: white;">
+<img src="figures/demo_inbetween_large_evon.png" width="300">
+<img src="figures/demo_inbetween_large_ivon.png" width="300">
 
 ## demo_logreg.py
 Bayesian logistic regression on a binary digit classification dataset (USPS 3vs5). Compares the exact posterior (found via piecewise bound and L-BFGS) to SLANG, IVON and EVON's posterior. 
