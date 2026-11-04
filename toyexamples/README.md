@@ -25,7 +25,7 @@ We find that EVON matches the exact Gaussian posterior found by full-Gaussian VO
 ## demo_hmc.py 
 This computes exact posterior marginals for multiclass Bayesian logistic regression on the Iris dataset, and compares them to IVON and EVON's marginals. This is Fig. 4(b) in the paper. 
 
-Expected output of `uv run demo_inbetween.py`.  <br>
+Expected output of `uv run demo_hmc.py`.  <br>
 <img src="figures/demo_hmc_beta_4_3.png" width="100">
 <img src="figures/demo_hmc_beta_4_2.png" width="100">
 <img src="figures/demo_hmc_beta_4_1.png" width="100">
@@ -48,7 +48,7 @@ Negative ELBO convergence:<br>
 ## demo_inbetween.py
 Trains a small and a larger MLP with both IVON and EVON on a simple 1D regression dataset. Visualizes the posterior uncertainty. 
 
-Expected output of `uv run demo_hmc.py`. 
+Expected output of `uv run demo_inbetween.py`. 
 
 Small Tanh-MLP, EVON (left) vs IVON (right) <br>
 <img src="figures/demo_inbetween_small_evon.png?v=2" width="300">
