@@ -1,5 +1,5 @@
 # Illustrative Toy Examples
-Various small-scale demonstrations of EVON, shown in the paper in Fig. 1, Fig. 3 and Fig. 4. 
+Various small-scale demonstrations of EVON, shown in the paper in Fig. 1, Fig. 3 and Fig. 4.  
 
 ## demo_2d.py
 This script compares on a simple 2d logistic regression problem the following methods: 
