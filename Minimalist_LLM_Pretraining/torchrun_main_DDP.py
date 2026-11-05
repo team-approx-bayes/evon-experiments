@@ -365,7 +365,10 @@ def evaluate_model(
     evaluated_on_tokens = 0
     total_loss = torch.tensor(0.0).to(device)
     total_loss_mean = torch.tensor(0.0).to(device)
-    total_batches = 1
+    # Number of eval batches on this rank; incremented once per batch below, so it must start at 0.
+    # (It used to start at 1, which divided the summed batch losses by N + 1 instead of N and
+    # biased the logged eval loss low by a factor N / (N + 1).)
+    total_batches = 0
     logger.info(f"Eval set prepared in {time.time() - _time:.2f} seconds")
 
     was_training = model.training
