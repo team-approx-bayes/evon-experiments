@@ -23,16 +23,20 @@ The codebase is organized into several directories for different experiments, bu
 
 *   **`modded-nanogpt/`**: Code for running the GPT-2 pretraining experiments. Adapted from [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
     *   `train_gpt2.py`: Main script for training GPT-2 models.
-    *   `eval_checkpoint_mc_loss.py`: Evaluates training checkpoints using Monte Carlo loss to measure weight uncertainty.
+    *   `eval_checkpoint_mc_loss.py`: Evaluates training checkpoints with the Monte Carlo Bayesian model averaging (BMA) loss (see below) to measure the usefulness of the weight uncertainty.
 *   **`Minimalist_LLM_Pretraining/`**: Code for Llama pretraining experiments. Adapted from [OptimAI-Lab/Minimalist_LLM_Pretraining](https://github.com/OptimAI-Lab/Minimalist_LLM_Pretraining).
     *   `torchrun_main_DDP.py`: Pretraining script using PyTorch Distributed Data Parallel (DDP).
-    *   `eval_llama_checkpoint_mc_loss.py`: Evaluates Llama checkpoints via Monte Carlo loss.
+    *   `eval_llama_checkpoint_mc_loss.py`: Evaluates Llama checkpoints with the Monte Carlo BMA loss (see below).
 *   **`clip-finetuning/`**: Code for fine-tuning CLIP visual encoders on image classification datasets. Adapted from [crisostomi/model-merging](https://github.com/crisostomi/model-merging).
     *   `finetune.py`: Standalone script for training and evaluation.
     *   `best_hparams/`: Contains optimal hyperparameters for each dataset/optimizer pair.
 *   **`src/`**: Contains the source code for the core packages.
     *   `vonsoap/`: Main Python package containing the optimizer implementations (SOAP, EVON, IVON).
 *   **`scripts/`**: Helper bash scripts for launching training and checkpoint evaluations (e.g., `gpt_speedrun_local.bash`, `llama_checkpoint_mc_eval_local.bash`).
+
+> [!NOTE]
+> **Monte Carlo BMA loss.** Both evaluation scripts, and the MC evaluation run during training, average the predicted **probabilities** of the $N$ sampled models, not their logits: the reported loss is the negative log-likelihood of the averaged predictive distribution,
+> $-\log \frac{1}{N}\sum_{i=1}^{N} p(y \mid x, \theta_i)$, with $\theta_i$ drawn from the posterior. The baseline it is compared to is the loss of the single model at the posterior mean.
 
 ---
 
